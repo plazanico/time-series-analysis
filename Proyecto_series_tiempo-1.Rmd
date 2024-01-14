@@ -1,0 +1,441 @@
+---
+title: "ANALISIS SERIES DE TIEMPO - RETAIL"
+author: "José Nicolás Plaza Bastidas"
+date: "22-06-2022"
+output: pdf_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      fig.align = "center")
+require(expsmooth)
+require(forecast)
+require(astsa)
+require(tseries)
+require(data.table)
+require(lubridate)
+require(LSTS)
+
+# Lectura de la base de datos
+
+df <- as.data.table(fread("datos_series.csv"))
+df_train <- df[fecha < as.Date("2020-01-01"), ]
+dt <- ts(df_train$UNIDADES, start = c(2017,1), frequency = 12)
+dt_test <- ts(df$UNIDADES, start = c(2017,1), frequency = 12)
+```
+
+
+
+La serie de tiempo corresponde a las ventas en unidades de una empresa de retail chilena, la cuál contiene información mensual desde 2017 hasta febrero del año 2020. El objetivo es predecir la venta en unidades en un horizonte de 2 meses. Es por ello, que separaremos la data de entrenamiento usando hasta fines del año 2019 y los dos meses del año 2020 como data de prueba.
+
+Las bases de datos de retail son famosas por presentar una estacionalidad bien marcada. La idea es aprovechar este comportamiento para estimar las unidades que podrían venderse y así tomar decisiones logísticas para evitar que exista agotamiento de stock para las fechas de mayor demanda.
+
+
+
+# 1.- Análisis descriptivo:
+
+Un análisis descriptivo de los datos se muestra a continuación:
+**Visualización de los datos**
+```{r}
+dt
+```
+
+**Summary**
+
+```{r}
+summary(dt)
+```
+
+Podemos observar que el valor máximo se encuentra muy lejano a los demás cuartiles. Esto se debe al efecto producido en el mes de diciembre por la navidad, donde hay un incremento sustancial en las ventas. Esto se puede ver de mejor forma en el gráfico.
+
+```{r, fig.height=3.5}
+ts.plot(dt,main="Venta en unidades",ylab="Unidades",xlab="Fecha", lwd = 2)
+```
+Se puede ver que la serie tiene una leve tendencia y períodos de gran venta en las navidades.
+
+
+## Análisis espectral
+
+
+Se realizó un análisis espectral mediante un periodograma para poder detectar estacionalidad en los datos, para así saber cuales son los períodos estacionales que predominan.
+
+
+```{r, fig.height=4}
+aux = periodogram(dt)
+plot(aux$periodogram ~ aux$lambda, type="l",main="Análisis espectral", ylab="Periodograma", xlab="Frecuencia de Fourier", lwd = 2)
+abline(v = 2*pi/12, lty=2, col="red", lwd = 2)
+abline(v = 2*pi/6, lty=2, col="blue", lwd = 2)
+abline(v = 2*pi/4, lty=2, col="green", lwd = 2)
+abline(v = 2*pi/3, lty=2, col="purple", lwd = 2)
+abline(v = 2*pi/2.4, lty=2, lwd = 2, col="gray")
+legend(2.65, 1.13e+10,
+       legend=c("S = 12", "S = 6", "S = 4", "S = 3", "S = 2.4"),
+       col=c("red", "blue", "green", "purple", "gray"), lwd = 1, cex=0.8)
+```
+
+Este gráfico también nos otorga información para saber si la serie debe ser diferenciada o no para quitar el efecto de la tendencia.
+Si la tendencia fuera alta, en el periodograma no podríamos distinguir los períodos estacionales y solo se vería una linea curva apegada a los ejes X e Y.
+
+En este caso, el periodograma si nos muestra de forma clara los períodos estacionales más fuertes. El problema es que tienen todos una altura semejante en el gráfico por lo cual es dificil tomar una decisión para saber con qué período quedarnos. Para complementar este análisis, utilizaremos la información del gráfico ACF que veremos a continuación para ver si logramos encontrar patrones estacionales.
+
+  
+# 2.- Gráficos ACF y PACF
+
+```{r, fig.height=3}
+par(mfrow=c(1,2))
+acf(dt, lag.max = 3000, main = "ACF")    #MA1
+pacf(dt, lag.max = 3000, main = "PACF")   #AR1
+```
+
+**ACF**: 
+
+* 1 rezago se sale de la banda.
+* Se detecta un patrón estacional que ocurre cada 12 meses.
+* No se observa decaimiento exponencial.
+* Dada la estacionalidad, podemos proponer un MA(1) combinado con SMA(1) a simple vista.
+
+
+**PACF**
+
+* 1 rezago se sale de la banda.
+* No se logra ver un patrón claro estacional.
+* Podemos proponer un AR(1) combinado con SAR(1) a simple vista dado que sabemos que la serie tiene estacionalidad marcada.
+
+
+Viendo los gráficos ACF, PACF y Periodograma, podemos ver que existe un patrón estacional marcado que se repite cada 12 meses. Lo cual es una información importante al momento de proponer el modelo.
+
+\newpage
+
+# 3.- Proposición de modelo de la familia SARIMA(p,d,q)X(P,D,Q)[S]
+
+Con las observaciones de los gráficos vistos, definiremos una grilla para un modelo SARIMA para distintas combinaciones de p,q,P,Q.
+los cuales tomarán valores 0 y 1. También veremos como se comporta si agregamos una diferenciación estacional (D=1).
+
+
+Una vez definida la grilla, compararemos los modelos según los criterios AIC y BIC de todos para seleccionar los mejores.
+
+```{r, echo=TRUE}
+
+t = 12
+fit1  <- Arima(y = dt, order = c(1,0,1), seasonal= list(order=c(1,1,1),period=t))
+fit2  <- Arima(y = dt, order = c(1,0,1), seasonal= list(order=c(0,1,1),period=t))
+fit3  <- Arima(y = dt, order = c(1,0,1), seasonal= list(order=c(1,1,0),period=t))
+fit4  <- Arima(y = dt, order = c(1,0,1), seasonal= list(order=c(0,1,0),period=t)) 
+fit5  <- Arima(y = dt, order = c(1,0,0), seasonal= list(order=c(1,1,1),period=t))
+fit6  <- Arima(y = dt, order = c(1,0,0), seasonal= list(order=c(0,1,1),period=t))
+fit7  <- Arima(y = dt, order = c(1,0,0), seasonal= list(order=c(1,1,0),period=t))
+fit8  <- Arima(y = dt, order = c(1,0,0), seasonal= list(order=c(0,1,0),period=t))
+fit9  <- Arima(y = dt, order = c(0,0,1), seasonal= list(order=c(1,1,1),period=t))
+fit10 <- Arima(y = dt, order = c(0,0,1), seasonal= list(order=c(0,1,1),period=t))
+fit11 <- Arima(y = dt, order = c(0,0,1), seasonal= list(order=c(1,1,0),period=t))
+fit12 <- Arima(y = dt, order = c(0,0,1), seasonal= list(order=c(0,1,0),period=t))
+fit13 <- Arima(y = dt, order = c(0,0,0), seasonal= list(order=c(1,1,1),period=t))
+fit14 <- Arima(y = dt, order = c(0,0,0), seasonal= list(order=c(0,1,1),period=t))
+fit15 <- Arima(y = dt, order = c(0,0,0), seasonal= list(order=c(1,1,0),period=t))
+```
+
+
+**Selección AIC **
+
+```{r}
+Tabla_aic =  AIC(
+    fit1,
+    fit2,
+    fit3,
+    fit4,
+    fit5,
+    fit6,
+    fit7,
+    fit8,
+    fit9,
+    fit10,
+    fit11,
+    fit12,
+    fit13,
+    fit14,
+    fit15
+    
+)
+Tabla_aic[order(Tabla_aic$AIC),]
+```
+
+
+Según el criterio AIC se seleccionan los modelos
+
+* 1.- SARIMA(1,0,0)(0,1,0)[12]  (fit8)
+* 2.- SARIMA(1,0,1)(0,1,0)[12]  (fit4)
+* 3.- SARIMA(1,0,0)(1,1,0)[12]  (fit7)
+
+
+**Selección BIC **
+
+```{r}
+Tabla_bic =  BIC(
+    fit1,
+    fit2,
+    fit3,
+    fit4,
+    fit5,
+    fit6,
+    fit7,
+    fit8,
+    fit9,
+    fit10,
+    fit11,
+    fit12,
+    fit13,
+    fit14,
+    fit15
+)
+Tabla_bic[order(Tabla_bic$BIC),]
+```
+
+
+Según el criterio BIC se seleccionan los modelos
+
+* 1.- SARIMA(1,0,0)(0,1,0)[12] (fit8)
+* 2.- SARIMA(1,0,1)(0,1,0)[12] (fit4)
+* 3.- SARIMA(1,0,0)(1,1,0)[12] (fit7)
+
+
+# 4.- Elección del modelo
+
+En base a lo anterior, se analizarán los mejores tres modelos puntuado según ambos criterios, es decir
+
+* 1.- SARIMA(1,0,0)(0,1,0)[12]
+
+$$ (1 - \phi_1 \cdot B)(1 - B^{12})X_t = \epsilon_t$$
+
+donde D = 1, S = 12 y $\phi_1$ = 0.7629
+
+* 2.- SARIMA(1,0,1)(0,1,0)[12]
+
+$$ (1 - \phi_1 \cdot B)(1 - B^{12})X_t = (1 + \theta_1) \epsilon_t$$
+
+donde D = 1, S = 12, $\phi_1$ = 0.8908  y $\theta_1$ = -0.3621
+
+* 3.- SARIMA(1,0,0)(1,1,0)[12]
+
+$$ (1 - \phi_1 \cdot B)(1 - \phi_1^{'} \cdot B^{12})(1 - B^{12})X_t = \epsilon_t$$
+
+donde D = 1, S = 12, $\phi_1$ = 0.7583  y $\phi_1^{'}$ = 0.1474
+
+\newpage
+
+# 5.- Evaluación de supuestos
+
+Con la función `tsdiag` podemos observar los p-value y ver si los residuos del modelo son un ruido blanco o no:
+
+```{r, fig.height=6}
+tsdiag(fit8)
+```
+Para el modelo SARIMA(1,0,0)(0,1,0)[12], el gráfico Box-Ljung muestra que los p-value están por sobre la banda de confianza, pero en el primer lag se ve un p-value muy abajo, por lo que nos puede dar indicios de que no se cumple muy bien el supuesto de indepencia y podría no ser un ruido blanco.
+
+
+```{r, fig.height=6}
+tsdiag(fit4)
+```
+Para el modelo SARIMA(1,0,1)(0,1,0)[12], el gráfico Box-Ljung muestra que los p-value están muy arriba por sobre la banda de confianza, por lo que se cumple que los residuos corresponden a un ruido blanco.
+
+
+
+```{r, fig.height=6}
+tsdiag(fit7)
+```
+Para el modelo SARIMA(1,0,0)(1,1,0)[12], el gráfico Box-Ljung muestra que los p-value están por sobre la banda de confianza, por lo que se cumple que los residuos corresponden a un ruido blanco.
+
+\newpage
+
+**Normalidad**
+
+```{r}
+residuos1 <- fit8$residuals
+qqnorm(residuos1, main = "SARIMA(1,0,0)(0,1,0)[12]")
+qqline(residuos1, col = "red")
+```
+
+
+Graficamente podemos ver que los residuos no siguen una distribución normal. Para complementar este análisis realizaremos un test de Shapiro-Wilks.
+
+Definimos el test de la siguiente forma:
+
+* $H_0$ : Los residuos se distribuyen normal
+* $H_1$ : Los residuos no se distribuyen normal
+
+Nivel de significancia:
+
+* $\alpha$ = 5%
+
+Rechazamos $H_0$ si el p-value es menor al nivel de significancia definido.
+
+
+```{r}
+shapiro.test(residuos1)
+```
+
+Vemos que el `p-value` es menor que $\alpha$ = 5%, por lo que rechazamos $H_0$, es decir, los residuos no siguen una distribución normal para el modelo SARIMA(1,0,0)(0,1,0)[12].
+
+\newpage
+
+De la misma forma, para el modelo SARIMA(1,0,1)(0,1,0)[12]
+```{r}
+residuos2 <- fit4$residuals
+qqnorm(residuos2, main = "SARIMA(1,0,1)(0,1,0)[12]")
+qqline(residuos2, col = "red")
+```
+
+```{r}
+shapiro.test(residuos2)
+```
+tampoco cumple el supuesto de normalidad para los residuos.
+
+\newpage
+
+Finalmente para el modelo SARIMA(1,0,0)(1,1,0)[12]
+
+```{r}
+residuos3 <- fit7$residuals
+qqnorm(residuos3, main = "SARIMA(1,0,0)(1,1,0)[12]")
+qqline(residuos3, col = "red")
+```
+
+```{r}
+shapiro.test(residuos3)
+```
+vemos que tampoco cumple el supuesto de normalidad.
+
+\newpage
+
+**Test de blancura**
+
+Para complementar esto, realizaremos un test de Box-Ljung en donde:
+
+* $H_0$: Los residuos son independientes
+* $H_1$: Los residuos no son independientes
+
+Rechazamos $H_0$ si el p-value es menor a nuestro $\alpha$ del 5%.
+
+* 1.- SARIMA(1,0,0)(0,1,0)[12]
+
+```{r}
+Box.test(residuos1, lag = 1, type = "Ljung-Box")
+```
+
+Tenemos que el p-value es mayor a nuestro $\alpha$, por lo que tenemos evidencia suficiente para no rechazar $H_0$. Por lo tanto, los residuos son independientes y corresponden a un ruido blanco.
+
+
+* 2.- SARIMA(1,0,1)(0,1,0)[12]
+
+```{r}
+Box.test(residuos2, lag = 1, type = "Ljung-Box")
+```
+
+* 3.- SARIMA(1,0,0)(1,1,0)[12]
+```{r}
+Box.test(residuos3, lag = 1, type = "Ljung-Box")
+```
+
+
+Tenemos que el p-value es mayor a nuestro $\alpha$, por lo que tenemos evidencia suficiente para no rechazar $H_0$. Por lo tanto, los residuos son independientes y corresponden a un ruido blanco para los tres modelos. Sin embargo, el modelo que mejor cumple este supuesto es el modelo **SARIMA(1,0,1)(0,1,0)[12]**, por lo cual nos quedamos con este modelo para analizar.
+
+## Modelo Causal e Invertible
+
+```{r}
+plot(fit4)
+```
+Se puede apreciar que las raíces se encuentran dentro del círculo unitario, es decir, el modelo es causal e invertible y por lo tanto se pueden hacer predicciones.
+
+# 6.- Predicciones a dos pasos:
+
+
+```{r}
+ajuste <- forecast(fit4,h = 2)
+ajuste2 <- ts(data = c(ajuste$fitted, ajuste$mean), start = c(2017,1), frequency = 12)
+plot(dt_test, lwd=2, main="Predicción a dos pasos modelo SARIMA(1,0,1)(0,1,0)[12]",ylab="Unidades",xlab="Fecha", xlim = c(2017,2020.125))
+lines(ajuste2, col = "purple", lwd = 2)
+abline(v = 2020, col = "gray", lwd = 3, lty = "dotted")
+legend(2017, 800000,
+       legend=c("Serie", "SARIMA"),
+       col=c("black", "purple"), lwd = 1, cex=0.8)
+```
+
+Donde los valores predichos para el mes de enero y febrero son 303979.0 y 254605.9 respectivamente.
+
+\newpage
+
+# 7.- Modelo ingenuo
+
+Se ajustaron tres modelos ingenuos los cuales son los siguientes
+
+* 1.- Holt-Winters
+
+```{r, fig.height=3.5}
+hw <- hw(dt, h = 2)
+hw2 <- ts(data = c(hw$fitted, hw$mean), start = c(2017,1), frequency = 12)
+plot(dt_test, lwd=2, main="Predicción a dos pasos modelo Holt- Winters aditivo",ylab="Unidades",xlab="Fecha", xlim = c(2017,2020.125))
+lines(hw2, col = "red", lwd = 2)
+abline(v = 2020, col = "gray", lwd = 3, lty = "dotted")
+legend(2017, 800000,
+       legend=c("Serie", "Holt-Winters"),
+       col=c("black", "red"), lwd = 1, cex=0.8)
+```
+
+donde sus parámetros ajustados fueron $\alpha$ = 0.0048, $\beta$ = 0.0048 y $\gamma$ = 1e-04. Los valores predichos para el mes de enero y febrero son 410847.0 y 356603.2 respectivamente.
+
+* 2.- Holt
+
+```{r, fig.height=3.5}
+holt <- holt(dt, h = 2)
+holt2 <- ts(data = c(holt$fitted, holt$mean), start = c(2017,1), frequency = 12)
+plot(dt_test, lwd=2, main="Predicción a dos pasos modelo Holt",ylab="Unidades",xlab="Fecha", xlim = c(2017,2020.125))
+lines(holt2, col = "blue", lwd = 2)
+abline(v = 2020, col = "gray", lwd = 3, lty = "dotted")
+legend(2017, 800000,
+       legend=c("Serie", "Holt"),
+       col=c("black", "blue"), lwd = 1, cex=0.8)
+```
+
+donde sus parámetros ajustados fueron $\alpha$ = 7e-04 y $\beta$ = 7e-04. Los valores predichos para el mes de enero y febrero son 454899.0 y 461402.8 respectivamente.
+
+* 3.- Suavizamiento exponencial simple (SES)
+
+```{r, fig.height=3.5}
+exp <- ses(dt, h = 2)
+exp2 <- ts(data = c(exp$fitted, exp$mean), start = c(2017,1), frequency = 12)
+plot(dt_test, lwd=2, main="Predicción a dos pasos suavizamiento exponencial simple",ylab="Unidades",xlab="Fecha", xlim = c(2017,2020.125))
+lines(exp2, col = "green", lwd = 2)
+abline(v = 2020, col = "gray", lwd = 3, lty = "dotted")
+legend(2017, 800000,
+       legend=c("Serie", "SES"),
+       col=c("black", "green"), lwd = 1, cex=0.8)
+```
+donde su parámetro ajustado fue $\alpha$ = 0.1778 y los valores predichos para el mes de enero y febrero son 436482.6 y 436482.6 respectivamente.
+
+
+En base a lo anterior, seleccionamos el modelo ingenuo Holt-Winters, ya que capta de mejor manera la estacionalidad de la serie.
+
+\newpage
+
+# 8.- Comparación de modelos
+
+Para comparar los modelos, utilizaremos la métrica del MAPE para comparar el puntaje de cada modelo.
+```{r}
+summary(hw)
+```
+Se muestran los parámetros ajustados para el modelo HW y el valor de cada métrica.
+
+```{r}
+summary(ajuste)
+```
+Se muestran los parámetros ajustados para el modelo SARIMA y el valor de cada métrica.
+
+En vista de lo anterior, el mejor modelo según el MAPE es el modelo SARIMA
+
+# 9.- Conclusiones
+
+En base a lo anterior, podemos ver que el ajuste del modelo SARIMA es el que tiene un menor MAPE en el ajuste de la serie, por ende las predicciones a dos pasos se acercan mejor a la venta real que se tendría para los meses de enero y febrero del año 2020. Lo anterior, ayuda en conocer como afecta el mes en que nos encontramos  con la venta generada en unidades, lo cual es útil para la empresa en términos de lógistica, para saber como redistribuir los productos vendidos anualmente.
+
+
+
